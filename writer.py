@@ -124,7 +124,7 @@ def _write_turn(conn, e: TurnTrace, ts: str) -> None:
         cursor = conn.execute(
             """
             INSERT INTO turns (
-                ts, source, session_key, turn_id, assistant_message_id,
+                ts, source, session_key, channel, turn_id, assistant_message_id,
                 user_msg, llm_output,
                 raw_llm_output, meme_tag, meme_media_count,
                 tool_calls, tool_chain_json,
@@ -133,15 +133,20 @@ def _write_turn(conn, e: TurnTrace, ts: str) -> None:
                 react_iteration_count, react_input_sum_tokens,
                 react_input_peak_tokens, react_final_input_tokens,
                 model_output_tokens,
+                usage_input_tokens, usage_cached_input_tokens,
+                usage_output_tokens, usage_reasoning_output_tokens,
+                usage_request_count, usage_covered_request_count,
+                usage_coverage,
                 react_cache_prompt_tokens, react_cache_hit_tokens,
                 error
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 ts,
                 e.source,
                 e.session_key,
+                e.channel,
                 e.turn_id,
                 e.assistant_message_id,
                 e.user_msg,
@@ -162,6 +167,13 @@ def _write_turn(conn, e: TurnTrace, ts: str) -> None:
                 e.react_input_peak_tokens,
                 e.react_final_input_tokens,
                 e.model_output_tokens,
+                e.usage_input_tokens,
+                e.usage_cached_input_tokens,
+                e.usage_output_tokens,
+                e.usage_reasoning_output_tokens,
+                e.usage_request_count,
+                e.usage_covered_request_count,
+                e.usage_coverage,
                 e.react_cache_prompt_tokens,
                 e.react_cache_hit_tokens,
                 e.error,

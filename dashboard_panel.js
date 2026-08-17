@@ -1,16 +1,17 @@
-// ../observe/dashboard_panel.tsx
+// ../../roxy-observe/dashboard_panel.tsx
 import {
   useCallback,
   useEffect,
   useRef,
   useState
 } from "react";
-import { Grid, MetricTile, TrendChart, Sparkline, Chip, api } from "@akashic/dashboard-ui";
+import { Grid, MetricTile, Pie, TrendChart, Sparkline, Chip, api } from "@akashic/dashboard-ui";
 import { Fragment, jsx, jsxs } from "react/jsx-runtime";
 var RANGES = [
   { key: "24h", label: "24 \u5C0F\u65F6" },
   { key: "7d", label: "7 \u5929" },
   { key: "30d", label: "30 \u5929" },
+  { key: "90d", label: "90 \u5929" },
   { key: "all", label: "\u5168\u90E8" }
 ];
 var SOURCE_LABEL = {
@@ -36,8 +37,33 @@ function _compact(value) {
   if (value >= 1e3) return `${(value / 1e3).toFixed(1)}K`;
   return String(Math.round(value));
 }
+function _compactKnown(value) {
+  return value == null ? "\u2014" : _compact(value);
+}
 function _pct(value) {
   return typeof value === "number" ? `${(value * 100).toFixed(1)}%` : "\u2014";
+}
+function _coverageLabel(coverage) {
+  const parts = [`\u7CBE\u786E ${coverage.exact}`];
+  if (coverage.partial > 0) parts.push(`\u90E8\u5206 ${coverage.partial}`);
+  if (coverage.unavailable > 0) parts.push(`\u4E0D\u53EF\u7528 ${coverage.unavailable}`);
+  if (coverage.legacy > 0) parts.push(`\u65E7\u8BB0\u5F55 ${coverage.legacy}`);
+  return parts.join(" \xB7 ");
+}
+function _combinedCacheRate(...summaries) {
+  const observed = summaries.filter(
+    (summary) => summary?.cache_prompt_tokens != null && summary.cache_hit_tokens != null
+  );
+  if (observed.length === 0) return null;
+  const prompt = observed.reduce((total, summary) => total + (summary.cache_prompt_tokens ?? 0), 0);
+  const hit = observed.reduce((total, summary) => total + (summary.cache_hit_tokens ?? 0), 0);
+  return prompt > 0 ? hit / prompt : null;
+}
+function _knownTrend(points, valueOf, scale = 1) {
+  return points.flatMap((point) => {
+    const value = valueOf(point);
+    return value == null ? [] : [{ label: _bucketLabel(point.bucket), value: value * scale }];
+  });
 }
 function _bucketLabel(bucket) {
   if (bucket.includes("T")) return `${bucket.slice(11, 13)}:00`;
@@ -477,6 +503,7 @@ function ObserveMain(_props) {
   const [range, setRange] = useState("24h");
   const [overview, setOverview] = useState(null);
   const [points, setPoints] = useState([]);
+  const [sourcePoints, setSourcePoints] = useState([]);
   const [gErr, setGErr] = useState(null);
   const [drillOpen, setDrillOpen] = useState(false);
   const [updatedAt, setUpdatedAt] = useState(0);
@@ -487,13 +514,15 @@ function ObserveMain(_props) {
   const load = useCallback(async () => {
     setRefreshing(true);
     try {
-      const [ov, series, ge] = await Promise.all([
-        api(`/api/dashboard/observe/overview?range=${range}`),
+      const [ov, series, sourceSeries, ge] = await Promise.all([
+        api(`/api/dashboard/observe/v2/overview?range=${range}`),
+        api(`/api/dashboard/observe/v2/timeseries?range=${range}`),
         api(`/api/dashboard/observe/timeseries?range=${range}`),
         api(`/api/dashboard/observe/global_errors/overview?range=${range}`)
       ]);
       setOverview(ov);
       setPoints(series.points ?? []);
+      setSourcePoints(sourceSeries.points ?? []);
       setGErr(ge);
       setUpdatedAt(Date.now());
     } finally {
@@ -517,11 +546,22 @@ function ObserveMain(_props) {
   }
   const turnSeries = points.map((p) => p.turns);
   const errorSeries = points.map((p) => p.errors);
-  const tokenSeries = points.map((p) => p.input_tokens);
-  const passiveHitSeries = points.map((p) => (p.passive_cache_hit_rate ?? 0) * 100);
-  const proactiveHitSeries = points.map((p) => (p.proactive_cache_hit_rate ?? 0) * 100);
-  const iterSeries = points.map((p) => p.avg_iteration ?? 0);
+  const inputTrend = _knownTrend(points, (p) => p.input_tokens);
+  const outputTrend = _knownTrend(points, (p) => p.output_tokens);
+  const coverageTrend = _knownTrend(points, (p) => p.request_coverage_rate, 100);
+  const passiveHitTrend = _knownTrend(sourcePoints, (p) => p.passive_cache_hit_rate, 100);
+  const proactiveHitTrend = _knownTrend(sourcePoints, (p) => p.proactive_cache_hit_rate, 100);
+  const iterTrend = _knownTrend(points, (p) => p.avg_iteration);
+  const inputSeries = inputTrend.map((p) => p.value);
+  const outputSeries = outputTrend.map((p) => p.value);
+  const coverageSeries = coverageTrend.map((p) => p.value);
+  const passiveHitSeries = passiveHitTrend.map((p) => p.value);
+  const iterSeries = iterTrend.map((p) => p.value);
   const labelled = (vals) => points.map((p, i) => ({ label: _bucketLabel(p.bucket), value: vals[i] }));
+  const passive = overview.sources.agent;
+  const proactiveRate = _combinedCacheRate(overview.sources.proactive, overview.sources.drift);
+  const cacheTone = overview.cache_hit_rate == null ? "muted" : "success";
+  const coverageTone = overview.request_coverage_rate == null ? "muted" : overview.coverage.partial > 0 || overview.coverage.unavailable > 0 || overview.coverage.legacy > 0 ? "warning" : "success";
   const gErrTotal = gErr?.total ?? overview.errors;
   return /* @__PURE__ */ jsxs(Fragment, { children: [
     /* @__PURE__ */ jsxs(
@@ -535,11 +575,11 @@ function ObserveMain(_props) {
           /* @__PURE__ */ jsxs("div", { className: "flex items-end justify-between", children: [
             /* @__PURE__ */ jsxs("div", { children: [
               /* @__PURE__ */ jsxs("div", { className: "flex items-center gap-2.5", children: [
-                /* @__PURE__ */ jsx("span", { className: "detail-title", children: "Observe \xB7 \u76D1\u6D4B" }),
+                /* @__PURE__ */ jsx("span", { className: "detail-title", children: "Roxy Observe \xB7 \u76D1\u6D4B" }),
                 /* @__PURE__ */ jsx("span", { className: "text-[11px] font-medium text-success", children: "\u5B9E\u65F6\u66F4\u65B0" })
               ] }),
               /* @__PURE__ */ jsxs("div", { className: "detail-subtext", children: [
-                "Agent \u4E3B\u5FAA\u73AF\u9065\u6D4B \xB7 Token / \u8FED\u4EE3 / \u9519\u8BEF",
+                "Roxy \u4E3B\u5FAA\u73AF\u9065\u6D4B \xB7 Token / \u7F13\u5B58 / \u8986\u76D6 / \u9519\u8BEF",
                 /* @__PURE__ */ jsxs("span", { className: "ml-2 font-mono text-[11px] text-subtle", children: [
                   "\u66F4\u65B0\u4E8E ",
                   _ago(nowTs - updatedAt)
@@ -594,20 +634,30 @@ function ObserveMain(_props) {
               ]
             }
           ),
+          /* @__PURE__ */ jsxs(Grid, { columns: 4, children: [
+            /* @__PURE__ */ jsx("div", { children: /* @__PURE__ */ jsx(MetricTile, { label: "\u7F13\u5B58\u547D\u4E2D\u7387", value: _pct(overview.cache_hit_rate), sub: `${_compactKnown(overview.cache_hit_tokens)} \u547D\u4E2D \xB7 ${_compactKnown(overview.cache_miss_tokens)} \u672A\u547D\u4E2D`, tone: cacheTone }) }),
+            /* @__PURE__ */ jsx("div", { children: /* @__PURE__ */ jsx(MetricTile, { label: "\u8F93\u5165 Token", value: _compactKnown(overview.input_tokens), sub: `${overview.cache_observed_turns} \u8F6E\u5177\u6709\u7F13\u5B58\u660E\u7EC6`, tone: "accent", spark: inputSeries }) }),
+            /* @__PURE__ */ jsx("div", { children: /* @__PURE__ */ jsx(MetricTile, { label: "\u8F93\u51FA Token", value: _compactKnown(overview.output_tokens), sub: `\u63A8\u7406 ${_compactKnown(overview.reasoning_output_tokens)}`, tone: "accent", spark: outputSeries }) }),
+            /* @__PURE__ */ jsx("div", { children: /* @__PURE__ */ jsx(MetricTile, { label: "\u8BF7\u6C42\u8986\u76D6\u7387", value: _pct(overview.request_coverage_rate), sub: _coverageLabel(overview.coverage), tone: coverageTone, spark: coverageSeries }) })
+          ] }),
           /* @__PURE__ */ jsxs(Grid, { columns: 3, children: [
             /* @__PURE__ */ jsx("div", { children: /* @__PURE__ */ jsx(MetricTile, { label: "\u5BF9\u8BDD\u8F6E\u6570", value: _compact(overview.turns), delta: _delta(turnSeries), sub: overview.last_ts ? `\u6700\u8FD1 ${_shortTs(overview.last_ts)}` : "\u65E0\u8BB0\u5F55", tone: "accent", spark: turnSeries }) }),
-            /* @__PURE__ */ jsx("div", { children: /* @__PURE__ */ jsx(MetricTile, { label: "\u88AB\u52A8 KV \u547D\u4E2D\u7387", value: _pct(overview.passive_cache_hit_rate), sub: `\u4E3B\u52A8 ${_pct(overview.proactive_cache_hit_rate)}`, tone: "success", spark: passiveHitSeries }) }),
+            /* @__PURE__ */ jsx("div", { children: /* @__PURE__ */ jsx(MetricTile, { label: "\u88AB\u52A8 KV \u547D\u4E2D\u7387", value: _pct(passive?.cache_hit_rate ?? null), sub: `\u4E3B\u52A8 ${_pct(proactiveRate)}`, tone: "success", spark: passiveHitSeries }) }),
             /* @__PURE__ */ jsx("div", { children: /* @__PURE__ */ jsx(MetricTile, { label: "\u5E73\u5747\u8FED\u4EE3", value: overview.avg_iteration != null ? overview.avg_iteration.toFixed(1) : "\u2014", unit: `\u5CF0 ${overview.max_iteration}`, sub: "\u6BCF\u8F6E LLM \u8C03\u7528\u6B21\u6570", tone: "warning", spark: iterSeries }) })
           ] }),
           /* @__PURE__ */ jsxs(Grid, { columns: 2, children: [
-            /* @__PURE__ */ jsx(Card, { title: "\u8F93\u5165 Token \u8D8B\u52BF", children: /* @__PURE__ */ jsx(TrendChart, { data: labelled(tokenSeries), kind: "area", tone: "accent", valueFmt: _compact }) }),
-            /* @__PURE__ */ jsx(Card, { title: "\u5E73\u5747\u8FED\u4EE3\u8D8B\u52BF", children: /* @__PURE__ */ jsx(TrendChart, { data: labelled(iterSeries), kind: "area", tone: "warning", valueFmt: (n) => n.toFixed(1) }) })
+            /* @__PURE__ */ jsx(Card, { title: "\u8F93\u5165 Token \u8D8B\u52BF", children: /* @__PURE__ */ jsx(TrendChart, { data: inputTrend, kind: "area", tone: "accent", valueFmt: _compact, empty: "\u6682\u65E0\u5DF2\u62A5\u544A\u8F93\u5165\u7528\u91CF" }) }),
+            /* @__PURE__ */ jsx(Card, { title: "\u8F93\u51FA Token \u8D8B\u52BF", children: /* @__PURE__ */ jsx(TrendChart, { data: outputTrend, kind: "area", tone: "accent", valueFmt: _compact, empty: "\u6682\u65E0\u5DF2\u62A5\u544A\u8F93\u51FA\u7528\u91CF" }) })
+          ] }),
+          /* @__PURE__ */ jsxs(Grid, { columns: 2, children: [
+            /* @__PURE__ */ jsx(Card, { title: "\u7F13\u5B58\u6784\u6210", children: overview.cache_prompt_tokens != null && overview.cache_prompt_tokens > 0 && overview.cache_hit_tokens != null && overview.cache_miss_tokens != null ? /* @__PURE__ */ jsx(Pie, { rate: overview.cache_hit_rate, hit: overview.cache_hit_tokens, miss: overview.cache_miss_tokens }) : /* @__PURE__ */ jsx("div", { className: "flex h-[170px] items-center justify-center text-[12px] text-subtle", children: "\u6682\u65E0\u7F13\u5B58\u660E\u7EC6" }) }),
+            /* @__PURE__ */ jsx(Card, { title: "\u8BF7\u6C42\u8986\u76D6\u7387\u8D8B\u52BF", children: /* @__PURE__ */ jsx(TrendChart, { data: coverageTrend, kind: "area", tone: "success", valueFmt: (n) => `${n.toFixed(0)}%`, empty: "\u6682\u65E0\u8BF7\u6C42\u8986\u76D6\u6570\u636E" }) })
           ] }),
           /* @__PURE__ */ jsxs("details", { className: "border-t border-border pt-1", children: [
             /* @__PURE__ */ jsx("summary", { className: "min-h-11 cursor-pointer py-3 text-[12px] font-semibold text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent", children: "\u67E5\u770B\u7F13\u5B58\u547D\u4E2D\u4E0E\u9519\u8BEF\u8D8B\u52BF" }),
             /* @__PURE__ */ jsxs(Grid, { columns: 2, children: [
-              /* @__PURE__ */ jsx(Card, { title: "\u5168\u5C40\u88AB\u52A8\u94FE\u8DEF\u547D\u4E2D\u7387\u8D8B\u52BF", children: /* @__PURE__ */ jsx(TrendChart, { data: labelled(passiveHitSeries), kind: "area", tone: "success", valueFmt: (n) => `${n.toFixed(0)}%` }) }),
-              /* @__PURE__ */ jsx(Card, { title: "\u5168\u5C40\u4E3B\u52A8\u94FE\u8DEF\u547D\u4E2D\u7387\u8D8B\u52BF", children: /* @__PURE__ */ jsx(TrendChart, { data: labelled(proactiveHitSeries), kind: "area", tone: "accent", valueFmt: (n) => `${n.toFixed(0)}%` }) }),
+              /* @__PURE__ */ jsx(Card, { title: "\u5168\u5C40\u88AB\u52A8\u94FE\u8DEF\u547D\u4E2D\u7387\u8D8B\u52BF", children: /* @__PURE__ */ jsx(TrendChart, { data: passiveHitTrend, kind: "area", tone: "success", valueFmt: (n) => `${n.toFixed(0)}%`, empty: "\u6682\u65E0\u88AB\u52A8\u94FE\u8DEF\u7F13\u5B58\u6570\u636E" }) }),
+              /* @__PURE__ */ jsx(Card, { title: "\u5168\u5C40\u4E3B\u52A8\u94FE\u8DEF\u547D\u4E2D\u7387\u8D8B\u52BF", children: /* @__PURE__ */ jsx(TrendChart, { data: proactiveHitTrend, kind: "area", tone: "accent", valueFmt: (n) => `${n.toFixed(0)}%`, empty: "\u6682\u65E0\u4E3B\u52A8\u94FE\u8DEF\u7F13\u5B58\u6570\u636E" }) }),
               /* @__PURE__ */ jsx(Card, { title: "\u9519\u8BEF\u8D8B\u52BF", children: /* @__PURE__ */ jsx(TrendChart, { data: labelled(errorSeries), kind: "bar", tone: "danger", valueFmt: (n) => String(n), empty: "\u6240\u9009\u533A\u95F4\u5185\u6CA1\u6709\u9519\u8BEF" }) })
             ] })
           ] })
@@ -634,7 +684,7 @@ window.AkashicDashboard.registerPlugin({
   ],
   async getCount() {
     try {
-      const ov = await api("/api/dashboard/observe/overview?range=all");
+      const ov = await api("/api/dashboard/observe/v2/overview?range=all");
       return ov.turns || 0;
     } catch {
       return null;

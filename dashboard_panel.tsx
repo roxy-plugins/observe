@@ -1,4 +1,3 @@
-/// <reference path="../../types/akashic-dashboard.d.ts" />
 import {
   useCallback,
   useEffect,
@@ -7,37 +6,50 @@ import {
   type ReactElement,
   type ReactNode,
 } from "react";
-import { Grid, MetricTile, TrendChart, Sparkline, Chip, api, type ChartTone } from "@akashic/dashboard-ui";
+import { Grid, MetricTile, Pie, TrendChart, Sparkline, Chip, api, type ChartTone } from "@akashic/dashboard-ui";
+import type { PluginDispatch } from "akashic-dashboard";
 
-interface Overview {
-  range: string;
+interface UsageCoverage {
+  exact: number;
+  partial: number;
+  unavailable: number;
+  legacy: number;
+}
+
+interface UsageSummary {
   turns: number;
   errors: number;
-  error_rate: number | null;
-  input_tokens: number;
-  cache_prompt_tokens: number;
-  cache_hit_tokens: number;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  reasoning_output_tokens: number | null;
+  cache_prompt_tokens: number | null;
+  cache_hit_tokens: number | null;
+  cache_miss_tokens: number | null;
   cache_hit_rate: number | null;
-  passive_cache_prompt_tokens: number;
-  passive_cache_hit_tokens: number;
-  passive_cache_hit_rate: number | null;
-  proactive_cache_prompt_tokens: number;
-  proactive_cache_hit_tokens: number;
-  proactive_cache_hit_rate: number | null;
+  cache_observed_turns: number;
+  request_count: number | null;
+  covered_request_count: number | null;
+  request_coverage_rate: number | null;
+  coverage: UsageCoverage;
   avg_iteration: number | null;
   max_iteration: number;
   last_ts: string | null;
 }
 
-interface SeriesPoint {
+interface UsageOverview extends UsageSummary {
+  schema_version: 2;
+  range: string;
+  sources: Record<string, UsageSummary>;
+}
+
+interface UsagePoint extends UsageSummary {
   bucket: string;
-  turns: number;
-  errors: number;
-  input_tokens: number;
-  cache_hit_rate: number | null;
+}
+
+interface SourceSeriesPoint {
+  bucket: string;
   passive_cache_hit_rate: number | null;
   proactive_cache_hit_rate: number | null;
-  avg_iteration: number | null;
 }
 
 // ── 全局错误（global_errors）类型 ──────────────────────────────────────────────
@@ -119,6 +131,7 @@ const RANGES: { key: string; label: string }[] = [
   { key: "24h", label: "24 小时" },
   { key: "7d", label: "7 天" },
   { key: "30d", label: "30 天" },
+  { key: "90d", label: "90 天" },
   { key: "all", label: "全部" },
 ];
 
@@ -149,8 +162,43 @@ function _compact(value: number): string {
   return String(Math.round(value));
 }
 
+function _compactKnown(value: number | null): string {
+  return value == null ? "—" : _compact(value);
+}
+
 function _pct(value: number | null): string {
   return typeof value === "number" ? `${(value * 100).toFixed(1)}%` : "—";
+}
+
+function _coverageLabel(coverage: UsageCoverage): string {
+  const parts = [`精确 ${coverage.exact}`];
+  if (coverage.partial > 0) parts.push(`部分 ${coverage.partial}`);
+  if (coverage.unavailable > 0) parts.push(`不可用 ${coverage.unavailable}`);
+  if (coverage.legacy > 0) parts.push(`旧记录 ${coverage.legacy}`);
+  return parts.join(" · ");
+}
+
+function _combinedCacheRate(...summaries: Array<UsageSummary | undefined>): number | null {
+  const observed = summaries.filter(
+    (summary): summary is UsageSummary => summary?.cache_prompt_tokens != null && summary.cache_hit_tokens != null,
+  );
+  if (observed.length === 0) return null;
+  const prompt = observed.reduce((total, summary) => total + (summary.cache_prompt_tokens ?? 0), 0);
+  const hit = observed.reduce((total, summary) => total + (summary.cache_hit_tokens ?? 0), 0);
+  return prompt > 0 ? hit / prompt : null;
+}
+
+function _knownTrend<T extends { bucket: string }>(
+  points: T[],
+  valueOf: (point: T) => number | null,
+  scale = 1,
+): Array<{ label: string; value: number }> {
+  return points.flatMap((point) => {
+    const value = valueOf(point);
+    return value == null
+      ? []
+      : [{ label: _bucketLabel(point.bucket), value: value * scale }];
+  });
 }
 
 // Shorten an ISO-bucket label: "2026-06-17T11" -> "11:00", "2026-06-17" -> "6-17".
@@ -635,8 +683,9 @@ function ObserveSkeleton(): ReactElement {
 // Grafana-style monitoring overview over observe.db agent-loop telemetry.
 function ObserveMain(_props: { dispatch: PluginDispatch }): ReactElement {
   const [range, setRange] = useState<string>("24h");
-  const [overview, setOverview] = useState<Overview | null>(null);
-  const [points, setPoints] = useState<SeriesPoint[]>([]);
+  const [overview, setOverview] = useState<UsageOverview | null>(null);
+  const [points, setPoints] = useState<UsagePoint[]>([]);
+  const [sourcePoints, setSourcePoints] = useState<SourceSeriesPoint[]>([]);
   const [gErr, setGErr] = useState<GErrOverview | null>(null);
   const [drillOpen, setDrillOpen] = useState<boolean>(false);
   const [updatedAt, setUpdatedAt] = useState<number>(0);
@@ -648,13 +697,15 @@ function ObserveMain(_props: { dispatch: PluginDispatch }): ReactElement {
   const load = useCallback(async () => {
     setRefreshing(true);
     try {
-      const [ov, series, ge] = await Promise.all([
-        api<Overview>(`/api/dashboard/observe/overview?range=${range}`),
-        api<{ points: SeriesPoint[] }>(`/api/dashboard/observe/timeseries?range=${range}`),
+      const [ov, series, sourceSeries, ge] = await Promise.all([
+        api<UsageOverview>(`/api/dashboard/observe/v2/overview?range=${range}`),
+        api<{ points: UsagePoint[] }>(`/api/dashboard/observe/v2/timeseries?range=${range}`),
+        api<{ points: SourceSeriesPoint[] }>(`/api/dashboard/observe/timeseries?range=${range}`),
         api<GErrOverview>(`/api/dashboard/observe/global_errors/overview?range=${range}`),
       ]);
       setOverview(ov);
       setPoints(series.points ?? []);
+      setSourcePoints(sourceSeries.points ?? []);
       setGErr(ge);
       setUpdatedAt(Date.now());
     } finally {
@@ -685,11 +736,26 @@ function ObserveMain(_props: { dispatch: PluginDispatch }): ReactElement {
 
   const turnSeries = points.map((p) => p.turns);
   const errorSeries = points.map((p) => p.errors);
-  const tokenSeries = points.map((p) => p.input_tokens);
-  const passiveHitSeries = points.map((p) => (p.passive_cache_hit_rate ?? 0) * 100);
-  const proactiveHitSeries = points.map((p) => (p.proactive_cache_hit_rate ?? 0) * 100);
-  const iterSeries = points.map((p) => p.avg_iteration ?? 0);
+  const inputTrend = _knownTrend(points, (p) => p.input_tokens);
+  const outputTrend = _knownTrend(points, (p) => p.output_tokens);
+  const coverageTrend = _knownTrend(points, (p) => p.request_coverage_rate, 100);
+  const passiveHitTrend = _knownTrend(sourcePoints, (p) => p.passive_cache_hit_rate, 100);
+  const proactiveHitTrend = _knownTrend(sourcePoints, (p) => p.proactive_cache_hit_rate, 100);
+  const iterTrend = _knownTrend(points, (p) => p.avg_iteration);
+  const inputSeries = inputTrend.map((p) => p.value);
+  const outputSeries = outputTrend.map((p) => p.value);
+  const coverageSeries = coverageTrend.map((p) => p.value);
+  const passiveHitSeries = passiveHitTrend.map((p) => p.value);
+  const iterSeries = iterTrend.map((p) => p.value);
   const labelled = (vals: number[]) => points.map((p, i) => ({ label: _bucketLabel(p.bucket), value: vals[i] }));
+  const passive = overview.sources.agent;
+  const proactiveRate = _combinedCacheRate(overview.sources.proactive, overview.sources.drift);
+  const cacheTone: ChartTone = overview.cache_hit_rate == null ? "muted" : "success";
+  const coverageTone: ChartTone = overview.request_coverage_rate == null
+    ? "muted"
+    : overview.coverage.partial > 0 || overview.coverage.unavailable > 0 || overview.coverage.legacy > 0
+      ? "warning"
+      : "success";
 
   // 全局错误总数（采集到的、跨子系统）优先用于「错误」卡，与排障台数字一致。
   const gErrTotal = gErr?.total ?? overview.errors;
@@ -705,11 +771,11 @@ function ObserveMain(_props: { dispatch: PluginDispatch }): ReactElement {
         <div className="flex items-end justify-between">
           <div>
             <div className="flex items-center gap-2.5">
-              <span className="detail-title">Observe · 监测</span>
+              <span className="detail-title">Roxy Observe · 监测</span>
               <span className="text-[11px] font-medium text-success">实时更新</span>
             </div>
             <div className="detail-subtext">
-              Agent 主循环遥测 · Token / 迭代 / 错误
+              Roxy 主循环遥测 · Token / 缓存 / 覆盖 / 错误
               <span className="ml-2 font-mono text-[11px] text-subtle">更新于 {_ago(nowTs - updatedAt)}</span>
             </div>
           </div>
@@ -763,13 +829,29 @@ function ObserveMain(_props: { dispatch: PluginDispatch }): ReactElement {
           )}
         </section>
 
+        {/* 模型用量指标 */}
+        <Grid columns={4}>
+          <div>
+            <MetricTile label="缓存命中率" value={_pct(overview.cache_hit_rate)} sub={`${_compactKnown(overview.cache_hit_tokens)} 命中 · ${_compactKnown(overview.cache_miss_tokens)} 未命中`} tone={cacheTone} />
+          </div>
+          <div>
+            <MetricTile label="输入 Token" value={_compactKnown(overview.input_tokens)} sub={`${overview.cache_observed_turns} 轮具有缓存明细`} tone="accent" spark={inputSeries} />
+          </div>
+          <div>
+            <MetricTile label="输出 Token" value={_compactKnown(overview.output_tokens)} sub={`推理 ${_compactKnown(overview.reasoning_output_tokens)}`} tone="accent" spark={outputSeries} />
+          </div>
+          <div>
+            <MetricTile label="请求覆盖率" value={_pct(overview.request_coverage_rate)} sub={_coverageLabel(overview.coverage)} tone={coverageTone} spark={coverageSeries} />
+          </div>
+        </Grid>
+
         {/* 关键运行指标 */}
         <Grid columns={3}>
           <div>
             <MetricTile label="对话轮数" value={_compact(overview.turns)} delta={_delta(turnSeries)} sub={overview.last_ts ? `最近 ${_shortTs(overview.last_ts)}` : "无记录"} tone="accent" spark={turnSeries} />
           </div>
           <div>
-            <MetricTile label="被动 KV 命中率" value={_pct(overview.passive_cache_hit_rate)} sub={`主动 ${_pct(overview.proactive_cache_hit_rate)}`} tone="success" spark={passiveHitSeries} />
+            <MetricTile label="被动 KV 命中率" value={_pct(passive?.cache_hit_rate ?? null)} sub={`主动 ${_pct(proactiveRate)}`} tone="success" spark={passiveHitSeries} />
           </div>
           <div>
             <MetricTile label="平均迭代" value={overview.avg_iteration != null ? overview.avg_iteration.toFixed(1) : "—"} unit={`峰 ${overview.max_iteration}`} sub="每轮 LLM 调用次数" tone="warning" spark={iterSeries} />
@@ -779,10 +861,23 @@ function ObserveMain(_props: { dispatch: PluginDispatch }): ReactElement {
         {/* 首要趋势 */}
         <Grid columns={2}>
           <Card title="输入 Token 趋势">
-            <TrendChart data={labelled(tokenSeries)} kind="area" tone="accent" valueFmt={_compact} />
+            <TrendChart data={inputTrend} kind="area" tone="accent" valueFmt={_compact} empty="暂无已报告输入用量" />
           </Card>
-          <Card title="平均迭代趋势">
-            <TrendChart data={labelled(iterSeries)} kind="area" tone="warning" valueFmt={(n) => n.toFixed(1)} />
+          <Card title="输出 Token 趋势">
+            <TrendChart data={outputTrend} kind="area" tone="accent" valueFmt={_compact} empty="暂无已报告输出用量" />
+          </Card>
+        </Grid>
+
+        <Grid columns={2}>
+          <Card title="缓存构成">
+            {overview.cache_prompt_tokens != null && overview.cache_prompt_tokens > 0 && overview.cache_hit_tokens != null && overview.cache_miss_tokens != null ? (
+              <Pie rate={overview.cache_hit_rate} hit={overview.cache_hit_tokens} miss={overview.cache_miss_tokens} />
+            ) : (
+              <div className="flex h-[170px] items-center justify-center text-[12px] text-subtle">暂无缓存明细</div>
+            )}
+          </Card>
+          <Card title="请求覆盖率趋势">
+            <TrendChart data={coverageTrend} kind="area" tone="success" valueFmt={(n) => `${n.toFixed(0)}%`} empty="暂无请求覆盖数据" />
           </Card>
         </Grid>
 
@@ -792,10 +887,10 @@ function ObserveMain(_props: { dispatch: PluginDispatch }): ReactElement {
           </summary>
           <Grid columns={2}>
             <Card title="全局被动链路命中率趋势">
-              <TrendChart data={labelled(passiveHitSeries)} kind="area" tone="success" valueFmt={(n) => `${n.toFixed(0)}%`} />
+              <TrendChart data={passiveHitTrend} kind="area" tone="success" valueFmt={(n) => `${n.toFixed(0)}%`} empty="暂无被动链路缓存数据" />
             </Card>
             <Card title="全局主动链路命中率趋势">
-              <TrendChart data={labelled(proactiveHitSeries)} kind="area" tone="accent" valueFmt={(n) => `${n.toFixed(0)}%`} />
+              <TrendChart data={proactiveHitTrend} kind="area" tone="accent" valueFmt={(n) => `${n.toFixed(0)}%`} empty="暂无主动链路缓存数据" />
             </Card>
             <Card title="错误趋势">
               <TrendChart data={labelled(errorSeries)} kind="bar" tone="danger" valueFmt={(n) => String(n)} empty="所选区间内没有错误" />
@@ -829,7 +924,7 @@ window.AkashicDashboard.registerPlugin({
 
   async getCount(): Promise<number | null> {
     try {
-      const ov = await api<Overview>("/api/dashboard/observe/overview?range=all");
+      const ov = await api<UsageOverview>("/api/dashboard/observe/v2/overview?range=all");
       return ov.turns || 0;
     } catch {
       return null;

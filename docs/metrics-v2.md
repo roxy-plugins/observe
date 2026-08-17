@@ -46,12 +46,14 @@ request_coverage = Σ covered_request_count / Σ request_count
 
 不得平均每 Turn 的命中率。`input_tokens` 缺失的记录不进入缓存分母；coverage 仍计入独立分布。`cached_input_tokens > input_tokens` 是损坏数据，查询和写入边界都必须失败。
 
+缓存聚合优先使用同一 Turn 的 `usage_input_tokens + usage_cached_input_tokens`。记录没有完整 V2 usage 对、但具有完整 `react_cache_prompt_tokens + react_cache_hit_tokens` 时，只在查询期把这组既有遥测计入缓存分子和分母。旧记录仍标记为 `legacy`；当前记录保留原有 coverage；两者都不会被回填或改写。两组都不完整时保持未知。Dashboard 趋势会跳过未知点，不把未知值绘制成零。
+
 ## 3. 数据增减合同
 
 | 对象 | 正常增加 | 允许更新 | 允许减少 | 恢复证据 |
 |---|---|---|---|---|
 | `turns` 遥测 | Observe 收到已提交生命周期事件后 INSERT | 不改写既有 usage；旧 schema 只增加新列 | 仅由版本化 retention 删除到期遥测 | SQLite backup、integrity check、聚合对账 |
-| usage 聚合投影 | 每次 Turn 插入后同事务推进 | 可从 `turns` 完整重建并更新水位 | 重建可替换派生行 | projection schema version、last turn id |
+| usage 查询投影 | Dashboard 请求从 `turns` 即时聚合 | 不持久更新 | 请求结束即释放 | API 测试和固定数据库快照 |
 | Dashboard 响应 | 每次请求即时派生 | 无持久更新 | 请求结束即释放 | API 测试和源数据库快照 |
 | plugin-data | 插件激活后写入自有目录 | 插件 migration owner 按合同更新 | 普通卸载不得删除 | manifest、artifact SHA、目录备份 |
 
@@ -79,9 +81,9 @@ V2 Dashboard API 使用 `/api/dashboard/observe/v2/*` 命名空间，至少提�
 
 - 加权命中率、miss tokens 和请求覆盖率具有独立单测，并能杀死“平均百分比”错误实现。
 - exact、partial、unavailable 与 null 在 DB、API 和 UI 三层保持一致。
+- 旧缓存遥测只作为只读聚合 fallback，既有行保持逐项不变。
 - 旧 Observe schema 能无损增加 V2 列；既有正文、错误、检索和记忆记录逐项不变。
 - API 响应不包含 `user_msg`、`llm_output`、`tool_calls` 或 traceback。
 - 插件禁用不影响 Core；普通卸载保留 plugin-data。
 - Python、Node、Dashboard 构建和固定 Core×Observe 合同 Gate 全部通过。
 - 发布报告固定 Core、Observe、合同与场景的完整 SHA；分支名和安装 cache 不能替代 revision。
-

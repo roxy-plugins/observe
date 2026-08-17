@@ -17,6 +17,7 @@ from .collector import GlobalErrorCollector
 from .dashboard import ObserveDashboardReader
 from .mobile_kvcache import KVCacheDashboardReader
 from .retention import run_retention_if_needed
+from .usage import NormalizedUsage, normalize_model_usage
 from .writer import TraceWriter
 
 logger = logging.getLogger("plugin.observe")
@@ -29,6 +30,7 @@ class _ObserveWriter(Protocol):
 
 class ObservePlugin(Plugin):
     api_version = 2
+
     @classmethod
     def dashboard_module(cls) -> str | None:
         return "dashboard.py"
@@ -39,14 +41,14 @@ class ObservePlugin(Plugin):
             module="mobile_panel.js",
             stylesheet="mobile_panel.css",
             navigation=MobileUiNavigation(
-                label="Observe",
-                description="缓存效率与运行健康",
+                label="Roxy Observe",
+                description="Roxy 缓存效率与运行健康",
             ),
             slots=("turn.after_answer",),
         )
 
     name = "observe"
-    version = "1.2.0"
+    version = "1.3.0"
 
     def activate(self) -> None:
         workspace = self.context.workspace
@@ -187,6 +189,7 @@ def _emit_turn_trace(writer: _ObserveWriter, event: TurnCommitted) -> None:
 
     post_reply_budget = event.post_reply_budget
     react_stats = event.react_stats
+    usage = normalize_model_usage(event.model_usage)
     tool_chain = event.tool_chain_raw
     tool_chain_json = (
         json.dumps(_slim_tool_chain(tool_chain), ensure_ascii=False)
@@ -198,6 +201,7 @@ def _emit_turn_trace(writer: _ObserveWriter, event: TurnCommitted) -> None:
         TurnTraceEvent(
             source="agent",
             session_key=event.session_key,
+            channel=event.channel,
             turn_id=event.turn_id or None,
             assistant_message_id=event.assistant_message_id,
             user_msg=event.persisted_user_message,
@@ -219,7 +223,16 @@ def _emit_turn_trace(writer: _ObserveWriter, event: TurnCommitted) -> None:
             react_input_sum_tokens=react_stats.get("turn_input_sum_tokens"),
             react_input_peak_tokens=react_stats.get("turn_input_peak_tokens"),
             react_final_input_tokens=react_stats.get("final_call_input_tokens"),
-            model_output_tokens=_model_usage_int(event.model_usage, "output_tokens"),
+            model_output_tokens=(
+                usage.output_tokens if usage.coverage == "exact" else None
+            ),
+            usage_input_tokens=usage.input_tokens,
+            usage_cached_input_tokens=usage.cached_input_tokens,
+            usage_output_tokens=usage.output_tokens,
+            usage_reasoning_output_tokens=usage.reasoning_output_tokens,
+            usage_request_count=usage.request_count,
+            usage_covered_request_count=usage.covered_request_count,
+            usage_coverage=usage.coverage,
             react_cache_prompt_tokens=react_stats.get("cache_prompt_tokens"),
             react_cache_hit_tokens=react_stats.get("cache_hit_tokens"),
         )
@@ -273,20 +286,15 @@ def _required_mobile_string(payload: dict[str, object], name: str) -> str:
     return value
 
 
-def _model_usage_int(model_usage: Mapping[str, object], name: str) -> int | None:
-    if model_usage.get("coverage") != "exact":
-        return None
-    value = model_usage.get(name)
-    return value if isinstance(value, int) and not isinstance(value, bool) else None
-
-
 def _to_proactive_turn_trace(event: ProactiveFinished):
     from .events import TurnTrace as TurnTraceEvent
 
     summary = event.final_message or event.skip_reason or event.gate_exit or ""
+    usage = _proactive_usage(event)
     return TurnTraceEvent(
         source=event.mode,
         session_key=event.session_key,
+        channel=_session_channel(event.session_key),
         user_msg=None,
         llm_output=summary,
         raw_llm_output=None,
@@ -294,9 +302,39 @@ def _to_proactive_turn_trace(event: ProactiveFinished):
         react_input_sum_tokens=None,
         react_input_peak_tokens=None,
         react_final_input_tokens=None,
+        usage_input_tokens=usage.input_tokens,
+        usage_cached_input_tokens=usage.cached_input_tokens,
+        usage_output_tokens=usage.output_tokens,
+        usage_reasoning_output_tokens=usage.reasoning_output_tokens,
+        usage_request_count=usage.request_count,
+        usage_covered_request_count=usage.covered_request_count,
+        usage_coverage=usage.coverage,
         react_cache_prompt_tokens=event.cache_prompt_tokens,
         react_cache_hit_tokens=event.cache_hit_tokens,
     )
+
+
+def _proactive_usage(event: ProactiveFinished) -> NormalizedUsage:
+    """把主动链路已报告的缓存数据保留为 partial usage。"""
+
+    has_cache = (
+        event.cache_prompt_tokens is not None
+        or event.cache_hit_tokens is not None
+    )
+    return normalize_model_usage(
+        {
+            "input_tokens": event.cache_prompt_tokens,
+            "cached_input_tokens": event.cache_hit_tokens,
+            "request_count": event.llm_call_count,
+            "covered_request_count": 0,
+            "coverage": "partial" if has_cache else "unavailable",
+        }
+    )
+
+
+def _session_channel(session_key: str) -> str | None:
+    head, separator, _ = session_key.partition(":")
+    return head if separator and head else None
 
 
 def _to_rag_query_log(event: RetrievalCompleted):
