@@ -43,4 +43,3 @@
 - 测试使用一次性 workspace 和 plugin home，不读取或写入正式 Roxy workspace。
 - 候选通过固定 revision 安装为 `latest`；只读行为验证通过后才能晋升 `stable`。
 - 交付说明必须列出插件 commit、Core commit、测试、未验证项、write set 和回滚点。
-
