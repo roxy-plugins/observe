@@ -2,6 +2,8 @@
 
 Roxy 可观测性插件，负责采集 Turn、检索、记忆写入和全局错误遥测，并提供模型用量、缓存效率与运行健康工作台。
 
+Canonical source：`https://github.com/roxy-plugins/observe`。
+
 插件内部 ID 继续保持 `observe`，以兼容既有安装、配置和数据。指标定义、持久化边界与实施状态见 [`docs/metrics-v2.md`](docs/metrics-v2.md)。
 
 ## 移动端

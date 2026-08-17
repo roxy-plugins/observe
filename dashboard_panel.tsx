@@ -6,8 +6,8 @@ import {
   type ReactElement,
   type ReactNode,
 } from "react";
-import { Grid, MetricTile, Pie, TrendChart, Sparkline, Chip, api, type ChartTone } from "@akashic/dashboard-ui";
-import type { PluginDispatch } from "akashic-dashboard";
+import { Grid, MetricTile, Pie, TrendChart, Sparkline, Chip, api, type ChartTone } from "@roxy/dashboard-ui";
+import type { PluginDispatch } from "roxy-dashboard";
 
 interface UsageCoverage {
   exact: number;
@@ -353,7 +353,7 @@ function ErrorDrill({
   };
 
   const gotoSession = (key: string): void => {
-    window.dispatchEvent(new CustomEvent("akashic:goto-session", { detail: key }));
+    window.dispatchEvent(new CustomEvent("roxy:goto-session", { detail: key }));
     close();
   };
 
@@ -904,7 +904,7 @@ function ObserveMain(_props: { dispatch: PluginDispatch }): ReactElement {
   );
 }
 
-window.AkashicDashboard.registerPlugin({
+window.RoxyDashboard.registerPlugin({
   id: "observe",
   label: "运行监测",
   viewLabel: "运行监测",

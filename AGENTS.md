@@ -17,7 +17,7 @@
 - Core `sessions.db/turns.usage_json` 拥有正式 Turn 终态用量；Observe 只保存插件遥测和派生投影。
 - 插件不得直接打开或修改 `sessions.db`，不得把临时图表状态反向写入 Core。
 - 插件 ID 固定为 `observe`。仓库地址、展示品牌和插件 ID 是不同身份。
-- `window.AkashicDashboard`、`@akashic/dashboard-ui` 等名称是当前宿主 ABI；在 Core 发布兼容别名前不得擅自重命名。
+- `window.RoxyDashboard`、`@roxy/dashboard-ui` 和 `roxy:*` 事件是当前宿主 ABI；旧 Akashic 名称只作为 Core 兼容别名，不得写入新的插件实现。
 - Dashboard 指标响应只返回计数、状态、时间和稳定 ID，不返回 Prompt、回复正文、工具参数或 traceback。
 
 ## 持久化
@@ -38,7 +38,7 @@
 
 ## 验证与发布
 
-- Python 测试使用显式 `AKASHIC_AGENT_ROOT` 指向固定 Core checkout，并记录两边完整 commit SHA。
+- Python 测试使用显式 `ROXY_AGENT_ROOT` 指向固定 Core checkout，并记录两边完整 commit SHA；旧变量只用于兼容回归。
 - 先运行定向单测，再运行全部插件测试、前端测试、静态检查和跨仓库合同 Gate。
 - 测试使用一次性 workspace 和 plugin home，不读取或写入正式 Roxy workspace。
 - 候选通过固定 revision 安装为 `latest`；只读行为验证通过后才能晋升 `stable`。

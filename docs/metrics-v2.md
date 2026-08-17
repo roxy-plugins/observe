@@ -7,6 +7,15 @@
 - baseline Core：`c1841a5de5b2f2d9725270bce2eed2c8a338ad2b`
 - baseline Observe：`4d85b9dc64ef0d8d96c5a635586ca17dd94b59cd`
 
+## 0. Roxy 组织迁移基线
+
+- 规范化前 Observe：`ecb6c8b6c24531ef729f9eb27871a10c507722ac`
+- 目标 Core：`e9bded1791a08cd945c2e1a0a7433bb141f83f65`
+- canonical source：`https://github.com/roxy-plugins/observe`
+- 允许修改：CI、身份文档、Dashboard 源文件及其构建产物、相关测试
+- 不修改：正式 workspace、`observe.db`、plugin-data、安装 cache 与既有遥测
+- 回滚点：迁移前 Git commit 与只读镜像
+
 ## 1. 目标
 
 Observe 在保持可安装、可禁用和可回滚的前提下，显示可解释的模型用量、缓存效率、请求覆盖和运行健康。第一阶段复用 Core 已发布的 `TurnCommitted.model_usage`，不直接查询 `sessions.db`，不新增 Core 数据库 schema。

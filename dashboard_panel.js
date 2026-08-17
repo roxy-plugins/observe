@@ -1,11 +1,11 @@
-// ../../roxy-observe/dashboard_panel.tsx
+// ../../roxy-plugin-migration-worktrees-20260818/observe/dashboard_panel.tsx
 import {
   useCallback,
   useEffect,
   useRef,
   useState
 } from "react";
-import { Grid, MetricTile, Pie, TrendChart, Sparkline, Chip, api } from "@akashic/dashboard-ui";
+import { Grid, MetricTile, Pie, TrendChart, Sparkline, Chip, api } from "@roxy/dashboard-ui";
 import { Fragment, jsx, jsxs } from "react/jsx-runtime";
 var RANGES = [
   { key: "24h", label: "24 \u5C0F\u65F6" },
@@ -193,7 +193,7 @@ function ErrorDrill({
     setDetail((d) => d ? { ...d, status } : d);
   };
   const gotoSession = (key) => {
-    window.dispatchEvent(new CustomEvent("akashic:goto-session", { detail: key }));
+    window.dispatchEvent(new CustomEvent("roxy:goto-session", { detail: key }));
     close();
   };
   return /* @__PURE__ */ jsxs(Fragment, { children: [
@@ -667,7 +667,7 @@ function ObserveMain(_props) {
     drillOpen && /* @__PURE__ */ jsx(ErrorDrill, { portalRef, range, onClose: () => setDrillOpen(false) })
   ] });
 }
-window.AkashicDashboard.registerPlugin({
+window.RoxyDashboard.registerPlugin({
   id: "observe",
   label: "\u8FD0\u884C\u76D1\u6D4B",
   viewLabel: "\u8FD0\u884C\u76D1\u6D4B",
