@@ -1,6 +1,6 @@
 -- Observe DB schema
 -- Agent Loop 可观测性数据库
--- 版本：5 (2026-05-02)
+-- 版本：6 (2026-08-18)
 
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous  = NORMAL;
@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS turns (
     ts          TEXT    NOT NULL,           -- ISO8601 UTC
     source      TEXT    NOT NULL,           -- 'agent'
     session_key TEXT    NOT NULL,
+    channel     TEXT,
     turn_id     TEXT,
     assistant_message_id TEXT,
     user_msg    TEXT,                       -- 用户原文
@@ -33,6 +34,13 @@ CREATE TABLE IF NOT EXISTS turns (
     react_input_peak_tokens INTEGER,        -- 本轮最大一次 LLM 输入估算 token
     react_final_input_tokens INTEGER,       -- 最后一次 LLM 输入估算 token
     model_output_tokens INTEGER,            -- 本轮全部模型调用的真实输出 token
+    usage_input_tokens INTEGER,             -- Core TurnUsage 输入 token
+    usage_cached_input_tokens INTEGER,      -- Core TurnUsage 缓存输入 token
+    usage_output_tokens INTEGER,            -- Core TurnUsage 已知输出 token
+    usage_reasoning_output_tokens INTEGER,  -- Core TurnUsage reasoning token
+    usage_request_count INTEGER,            -- 本轮模型请求数
+    usage_covered_request_count INTEGER,    -- 完整 usage 请求数
+    usage_coverage TEXT,                    -- exact | partial | unavailable
     react_cache_prompt_tokens INTEGER,      -- DeepSeek KV cache: 本轮输入中 hit+miss tokens
     react_cache_hit_tokens INTEGER,         -- DeepSeek KV cache: 本轮缓存命中 tokens
     error       TEXT                        -- NULL = 正常
@@ -43,6 +51,7 @@ CREATE INDEX IF NOT EXISTS ix_turns_source ON turns (source, ts);
 CREATE UNIQUE INDEX IF NOT EXISTS ux_turns_assistant_message_id ON turns (assistant_message_id) WHERE assistant_message_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS ix_turns_cache_recent ON turns (ts DESC, id DESC) WHERE react_cache_prompt_tokens IS NOT NULL;
 CREATE INDEX IF NOT EXISTS ix_turns_agent_cache_recent ON turns (ts DESC, id DESC) WHERE source = 'agent' AND react_cache_prompt_tokens IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_turns_usage_recent ON turns (ts DESC, id DESC) WHERE usage_coverage IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS kv_cache_totals (
     id INTEGER PRIMARY KEY CHECK (id = 1),

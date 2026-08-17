@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS turns (
     ts          TEXT    NOT NULL,
     source      TEXT    NOT NULL,
     session_key TEXT    NOT NULL,
+    channel     TEXT,
     turn_id     TEXT,
     assistant_message_id TEXT,
     user_msg    TEXT,
@@ -35,6 +36,13 @@ CREATE TABLE IF NOT EXISTS turns (
     react_input_peak_tokens INTEGER,
     react_final_input_tokens INTEGER,
     model_output_tokens INTEGER,
+    usage_input_tokens INTEGER,
+    usage_cached_input_tokens INTEGER,
+    usage_output_tokens INTEGER,
+    usage_reasoning_output_tokens INTEGER,
+    usage_request_count INTEGER,
+    usage_covered_request_count INTEGER,
+    usage_coverage TEXT,
     react_cache_prompt_tokens INTEGER,
     react_cache_hit_tokens INTEGER,
     error       TEXT                        -- NULL = 正常
@@ -123,6 +131,7 @@ CREATE INDEX IF NOT EXISTS ix_gerr_type ON global_errors (error_type, last_ts);
 
 
 _TURNS_COLUMNS: dict[str, str] = {
+    "channel": "TEXT",
     "turn_id": "TEXT",
     "assistant_message_id": "TEXT",
     "tool_chain_json": "TEXT",
@@ -140,6 +149,13 @@ _TURNS_COLUMNS: dict[str, str] = {
     "react_input_peak_tokens": "INTEGER",
     "react_final_input_tokens": "INTEGER",
     "model_output_tokens": "INTEGER",
+    "usage_input_tokens": "INTEGER",
+    "usage_cached_input_tokens": "INTEGER",
+    "usage_output_tokens": "INTEGER",
+    "usage_reasoning_output_tokens": "INTEGER",
+    "usage_request_count": "INTEGER",
+    "usage_covered_request_count": "INTEGER",
+    "usage_coverage": "TEXT",
     "react_cache_prompt_tokens": "INTEGER",
     "react_cache_hit_tokens": "INTEGER",
 }
@@ -168,6 +184,11 @@ def _ensure_turns_columns(conn: sqlite3.Connection) -> None:
         "ON turns (ts DESC, id DESC) "
         "WHERE source = 'agent' AND react_cache_prompt_tokens IS NOT NULL"
     )
+    _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS ix_turns_usage_recent "
+        "ON turns (ts DESC, id DESC) WHERE usage_coverage IS NOT NULL"
+    )
+
 
 def _migrate_removed_proactive_observe(conn: sqlite3.Connection) -> None:
     _ = conn.execute("DROP TABLE IF EXISTS proactive_decisions")

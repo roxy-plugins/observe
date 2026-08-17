@@ -3,7 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Literal
 import json
 import sqlite3
 import threading
@@ -21,15 +21,152 @@ _RANGES: dict[str, int | None] = {
     "24h": 24,
     "7d": 24 * 7,
     "30d": 24 * 30,
+    "90d": 24 * 90,
     "all": None,
 }
+DashboardRange = Literal["24h", "7d", "30d", "90d", "all"]
+
+_USAGE_AGGREGATE_SQL = """
+    COUNT(*) AS turns,
+    SUM(CASE WHEN error IS NOT NULL THEN 1 ELSE 0 END) AS errors,
+    SUM(usage_input_tokens) AS input_tokens,
+    SUM(usage_output_tokens) AS output_tokens,
+    SUM(usage_reasoning_output_tokens) AS reasoning_output_tokens,
+    SUM(
+        CASE
+            WHEN usage_input_tokens IS NOT NULL
+             AND usage_cached_input_tokens IS NOT NULL
+            THEN usage_input_tokens
+            WHEN react_cache_prompt_tokens IS NOT NULL
+             AND react_cache_hit_tokens IS NOT NULL
+            THEN react_cache_prompt_tokens
+        END
+    ) AS cache_prompt_tokens,
+    SUM(
+        CASE
+            WHEN usage_input_tokens IS NOT NULL
+             AND usage_cached_input_tokens IS NOT NULL
+            THEN usage_cached_input_tokens
+            WHEN react_cache_prompt_tokens IS NOT NULL
+             AND react_cache_hit_tokens IS NOT NULL
+            THEN react_cache_hit_tokens
+        END
+    ) AS cache_hit_tokens,
+    SUM(usage_request_count) AS request_count,
+    SUM(usage_covered_request_count) AS covered_request_count,
+    SUM(CASE WHEN usage_coverage = 'exact' THEN 1 ELSE 0 END) AS exact_turns,
+    SUM(CASE WHEN usage_coverage = 'partial' THEN 1 ELSE 0 END) AS partial_turns,
+    SUM(CASE WHEN usage_coverage = 'unavailable' THEN 1 ELSE 0 END) AS unavailable_turns,
+    SUM(CASE WHEN usage_coverage IS NULL THEN 1 ELSE 0 END) AS legacy_turns,
+    SUM(
+        CASE
+            WHEN usage_input_tokens IS NOT NULL
+             AND usage_cached_input_tokens IS NOT NULL
+            THEN 1
+            WHEN react_cache_prompt_tokens IS NOT NULL
+             AND react_cache_hit_tokens IS NOT NULL
+            THEN 1
+            ELSE 0
+        END
+    ) AS cache_observed_turns,
+    SUM(
+        CASE
+            WHEN usage_input_tokens IS NOT NULL
+             AND usage_cached_input_tokens IS NOT NULL
+             AND usage_cached_input_tokens > usage_input_tokens
+            THEN 1
+            WHEN (usage_input_tokens IS NULL OR usage_cached_input_tokens IS NULL)
+             AND react_cache_prompt_tokens IS NOT NULL
+             AND react_cache_hit_tokens IS NOT NULL
+             AND react_cache_hit_tokens > react_cache_prompt_tokens
+            THEN 1
+            ELSE 0
+        END
+    ) AS invalid_cache_turns,
+    SUM(
+        CASE
+            WHEN usage_request_count IS NOT NULL
+             AND usage_covered_request_count IS NOT NULL
+             AND usage_covered_request_count > usage_request_count
+            THEN 1 ELSE 0
+        END
+    ) AS invalid_request_turns,
+    SUM(
+        CASE
+            WHEN usage_input_tokens < 0
+              OR usage_cached_input_tokens < 0
+              OR usage_output_tokens < 0
+              OR usage_reasoning_output_tokens < 0
+              OR usage_request_count < 0
+              OR usage_covered_request_count < 0
+              OR react_cache_prompt_tokens < 0
+              OR react_cache_hit_tokens < 0
+              OR (
+                  usage_coverage IS NOT NULL
+                  AND usage_coverage NOT IN ('exact', 'partial', 'unavailable')
+              )
+              OR (
+                  usage_coverage IS NOT NULL
+                  AND (
+                      usage_request_count IS NULL
+                      OR usage_covered_request_count IS NULL
+                  )
+              )
+              OR (
+                  usage_coverage IS NULL
+                  AND (
+                      usage_input_tokens IS NOT NULL
+                      OR usage_cached_input_tokens IS NOT NULL
+                      OR usage_output_tokens IS NOT NULL
+                      OR usage_reasoning_output_tokens IS NOT NULL
+                      OR usage_request_count IS NOT NULL
+                      OR usage_covered_request_count IS NOT NULL
+                  )
+              )
+              OR (
+                  usage_coverage = 'exact'
+                  AND (
+                      usage_request_count IS NULL
+                      OR usage_request_count <= 0
+                      OR usage_covered_request_count IS NULL
+                      OR usage_covered_request_count != usage_request_count
+                      OR usage_input_tokens IS NULL
+                      OR usage_output_tokens IS NULL
+                  )
+              )
+              OR (
+                  usage_coverage = 'unavailable'
+                  AND COALESCE(usage_covered_request_count, 0) != 0
+              )
+              OR (
+                  usage_coverage = 'partial'
+                  AND (
+                      usage_request_count IS NULL
+                      OR usage_request_count <= 0
+                      OR (
+                          usage_input_tokens IS NULL
+                          AND usage_cached_input_tokens IS NULL
+                          AND usage_output_tokens IS NULL
+                          AND usage_reasoning_output_tokens IS NULL
+                      )
+                  )
+              )
+            THEN 1 ELSE 0
+        END
+    ) AS invalid_usage_turns,
+    AVG(react_iteration_count) AS avg_iteration,
+    MAX(react_iteration_count) AS max_iteration,
+    MAX(ts) AS last_ts
+"""
 
 
 # Resolve a range token to (cutoff_iso, bucket_len). bucket_len is the substring
 # length of the ISO ts used to group time buckets: 13 = hour (YYYY-MM-DDTHH),
 # 10 = day (YYYY-MM-DD).
 def _resolve_range(range_token: str) -> tuple[str | None, int]:
-    hours = _RANGES.get(range_token, 24)
+    if range_token not in _RANGES:
+        raise ValueError(f"不支持的 Observe 时间范围: {range_token}")
+    hours = _RANGES[range_token]
     bucket_len = 13 if (hours is not None and hours <= 24) else 10
     if hours is None:
         return None, bucket_len
@@ -103,6 +240,80 @@ class ObserveDashboardReader:
             "range": range_token,
             "bucket": _bucket_name(bucket_len),
             "points": [_point_from_row(r) for r in rows],
+        }
+
+    def get_usage_overview(self, range_token: str) -> dict[str, Any]:
+        """在一个 SQLite 快照中返回 V2 usage 总览和 source 拆分。"""
+
+        cutoff, _ = _resolve_range(range_token)
+        if not self.db_path.exists():
+            return _empty_usage_overview(range_token)
+        where, params = _agent_window(cutoff)
+
+        # 1. UNION 让整体与 source 拆分读取同一个 statement snapshot。
+        with self._lock, _connect(self.db_path) as db:
+            rows = db.execute(
+                f"""
+                SELECT 'all' AS metric_source, {_USAGE_AGGREGATE_SQL}
+                FROM turns
+                WHERE {where}
+                UNION ALL
+                SELECT source AS metric_source, {_USAGE_AGGREGATE_SQL}
+                FROM turns
+                WHERE {where}
+                GROUP BY source
+                ORDER BY metric_source
+                """,
+                (*params, *params),
+            ).fetchall()
+
+        overall = next(
+            (_usage_summary(row) for row in rows if row["metric_source"] == "all"),
+            _empty_usage_summary(),
+        )
+        sources = {
+            str(row["metric_source"]): _usage_summary(row)
+            for row in rows
+            if row["metric_source"] != "all"
+        }
+        return {
+            "schema_version": 2,
+            "range": range_token,
+            **overall,
+            "sources": sources,
+        }
+
+    def get_usage_timeseries(self, range_token: str) -> dict[str, Any]:
+        """按小时或日期返回 V2 usage 加权时间序列。"""
+
+        cutoff, bucket_len = _resolve_range(range_token)
+        if not self.db_path.exists():
+            return {
+                "schema_version": 2,
+                "range": range_token,
+                "bucket": _bucket_name(bucket_len),
+                "points": [],
+            }
+        where, params = _agent_window(cutoff)
+        with self._lock, _connect(self.db_path) as db:
+            rows = db.execute(
+                f"""
+                SELECT substr(ts, 1, ?) AS bucket, {_USAGE_AGGREGATE_SQL}
+                FROM turns
+                WHERE {where}
+                GROUP BY bucket
+                ORDER BY bucket ASC
+                """,
+                (bucket_len, *params),
+            ).fetchall()
+        return {
+            "schema_version": 2,
+            "range": range_token,
+            "bucket": _bucket_name(bucket_len),
+            "points": [
+                {"bucket": row["bucket"], **_usage_summary(row)}
+                for row in rows
+            ],
         }
 
     # Error rows plus a top-N aggregation by normalized error signature.
@@ -360,27 +571,35 @@ def register(app: FastAPI, plugin_dir: Path, workspace: Path) -> None:
     reader = ObserveDashboardReader(workspace)
 
     @app.get("/api/dashboard/observe/overview")
-    def observe_overview(range: str = "24h") -> dict[str, Any]:
+    def observe_overview(range: DashboardRange = "24h") -> dict[str, Any]:
         return reader.get_overview(range)
 
     @app.get("/api/dashboard/observe/timeseries")
-    def observe_timeseries(range: str = "24h") -> dict[str, Any]:
+    def observe_timeseries(range: DashboardRange = "24h") -> dict[str, Any]:
         return reader.get_timeseries(range)
 
+    @app.get("/api/dashboard/observe/v2/overview")
+    def observe_usage_overview(range: DashboardRange = "24h") -> dict[str, Any]:
+        return reader.get_usage_overview(range)
+
+    @app.get("/api/dashboard/observe/v2/timeseries")
+    def observe_usage_timeseries(range: DashboardRange = "24h") -> dict[str, Any]:
+        return reader.get_usage_timeseries(range)
+
     @app.get("/api/dashboard/observe/errors")
-    def observe_errors(range: str = "24h", page: int = 1, page_size: int = 25) -> dict[str, Any]:
+    def observe_errors(range: DashboardRange = "24h", page: int = 1, page_size: int = 25) -> dict[str, Any]:
         return reader.get_errors(range, page=page, page_size=page_size)
 
     @app.get("/api/dashboard/observe/global_errors/overview")
-    def global_errors_overview(range: str = "24h") -> dict[str, Any]:
+    def global_errors_overview(range: DashboardRange = "24h") -> dict[str, Any]:
         return reader.get_global_overview(range)
 
     @app.get("/api/dashboard/observe/global_errors")
-    def global_errors_list(range: str = "24h", facet: str = "type", q: str = "") -> dict[str, Any]:
+    def global_errors_list(range: DashboardRange = "24h", facet: str = "type", q: str = "") -> dict[str, Any]:
         return reader.get_global_list(range, facet=facet, q=q)
 
     @app.get("/api/dashboard/observe/global_errors/{fingerprint}")
-    def global_errors_detail(fingerprint: str, range: str = "7d") -> dict[str, Any]:
+    def global_errors_detail(fingerprint: str, range: DashboardRange = "7d") -> dict[str, Any]:
         return reader.get_global_detail(fingerprint, range)
 
     @app.post("/api/dashboard/observe/global_errors/{fingerprint}/status")
@@ -402,6 +621,114 @@ def _bucket_name(bucket_len: int) -> str:
 
 def _rate(hit: int, total: int) -> float | None:
     return (hit / total) if total > 0 else None
+
+
+def _usage_summary(row: sqlite3.Row) -> dict[str, Any]:
+    """把 SQL usage 聚合映射为不伪造未知值的 API DTO。"""
+
+    input_tokens = _optional_row_int(row, "input_tokens")
+    output_tokens = _optional_row_int(row, "output_tokens")
+    reasoning_tokens = _optional_row_int(row, "reasoning_output_tokens")
+    cache_prompt = _optional_row_int(row, "cache_prompt_tokens")
+    cache_hit = _optional_row_int(row, "cache_hit_tokens")
+    request_count = _optional_row_int(row, "request_count")
+    covered_request_count = _optional_row_int(row, "covered_request_count")
+    if int(row["invalid_usage_turns"] or 0) > 0:
+        raise ValueError("Observe usage 存在字段、coverage 或完整性损坏记录")
+    if int(row["invalid_cache_turns"] or 0) > 0:
+        raise ValueError("Observe usage 存在 cache hit 大于 input 的损坏记录")
+    if int(row["invalid_request_turns"] or 0) > 0:
+        raise ValueError("Observe usage 存在 covered request 大于 request 的损坏记录")
+    if cache_prompt is not None and cache_hit is not None and cache_hit > cache_prompt:
+        raise ValueError("Observe usage 聚合中 cache hit 大于 cache prompt")
+    if (
+        request_count is not None
+        and covered_request_count is not None
+        and covered_request_count > request_count
+    ):
+        raise ValueError("Observe usage 聚合中 covered request 大于 request")
+    return {
+        "turns": int(row["turns"] or 0),
+        "errors": int(row["errors"] or 0),
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "reasoning_output_tokens": reasoning_tokens,
+        "cache_prompt_tokens": cache_prompt,
+        "cache_hit_tokens": cache_hit,
+        "cache_miss_tokens": (
+            cache_prompt - cache_hit
+            if cache_prompt is not None and cache_hit is not None
+            else None
+        ),
+        "cache_hit_rate": (
+            _rate(cache_hit, cache_prompt)
+            if cache_prompt is not None and cache_hit is not None
+            else None
+        ),
+        "cache_observed_turns": int(row["cache_observed_turns"] or 0),
+        "request_count": request_count,
+        "covered_request_count": covered_request_count,
+        "request_coverage_rate": (
+            _rate(covered_request_count, request_count)
+            if request_count is not None
+            and covered_request_count is not None
+            else None
+        ),
+        "coverage": {
+            "exact": int(row["exact_turns"] or 0),
+            "partial": int(row["partial_turns"] or 0),
+            "unavailable": int(row["unavailable_turns"] or 0),
+            "legacy": int(row["legacy_turns"] or 0),
+        },
+        "avg_iteration": (
+            float(row["avg_iteration"])
+            if row["avg_iteration"] is not None
+            else None
+        ),
+        "max_iteration": int(row["max_iteration"] or 0),
+        "last_ts": row["last_ts"],
+    }
+
+
+def _optional_row_int(row: sqlite3.Row, name: str) -> int | None:
+    value = row[name]
+    return int(value) if value is not None else None
+
+
+def _empty_usage_summary() -> dict[str, Any]:
+    return {
+        "turns": 0,
+        "errors": 0,
+        "input_tokens": None,
+        "output_tokens": None,
+        "reasoning_output_tokens": None,
+        "cache_prompt_tokens": None,
+        "cache_hit_tokens": None,
+        "cache_miss_tokens": None,
+        "cache_hit_rate": None,
+        "cache_observed_turns": 0,
+        "request_count": None,
+        "covered_request_count": None,
+        "request_coverage_rate": None,
+        "coverage": {
+            "exact": 0,
+            "partial": 0,
+            "unavailable": 0,
+            "legacy": 0,
+        },
+        "avg_iteration": None,
+        "max_iteration": 0,
+        "last_ts": None,
+    }
+
+
+def _empty_usage_overview(range_token: str) -> dict[str, Any]:
+    return {
+        "schema_version": 2,
+        "range": range_token,
+        **_empty_usage_summary(),
+        "sources": {},
+    }
 
 
 def _overview_from_row(row: sqlite3.Row | None, range_token: str) -> dict[str, Any]:
