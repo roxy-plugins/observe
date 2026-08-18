@@ -48,7 +48,7 @@ class ObservePlugin(Plugin):
         )
 
     name = "observe"
-    version = "1.3.0"
+    version = "1.3.1"
 
     def activate(self) -> None:
         workspace = self.context.workspace
