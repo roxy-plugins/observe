@@ -2,6 +2,10 @@
 
 Akashic 可观测性插件，负责采集 Turn、检索、记忆写入和全局错误遥测。
 
+桌面 Dashboard 必须同时发布 `dashboard_panel.js` 与 `dashboard_panel.css`。CSS 是从
+`dashboard_panel.tsx` 使用目标 Core 的 Dashboard Tailwind 配置生成的插件自有产物，
+不能依赖宿主构建时偶然扫描到插件源码。
+
 ## 移动端
 
 插件自带一个移动端 Observe 入口，并在同一看板内提供两个任务视图：

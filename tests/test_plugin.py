@@ -87,6 +87,7 @@ async def _run_mobile_turn_observe_seam(
         kv_store=PluginKVStore(workspace / "plugin-data/observe-builtin/.kv.json"),
         workspace=workspace,
         scope=scope,
+        _can_start_tasks=lambda: True,
     )
     manager = SessionManager(workspace)
     committed: list[TurnCommitted] = []
@@ -192,6 +193,7 @@ async def test_observe_plugin_activate_and_terminate(tmp_path: Path) -> None:
         kv_store=PluginKVStore(tmp_path / ".kv.json"),
         workspace=tmp_path,
         scope=scope,
+        _can_start_tasks=lambda: True,
     )
     plugin.activate()
     await asyncio.sleep(0.05)
